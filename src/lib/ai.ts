@@ -8,6 +8,7 @@ export interface AIConfig {
   apiKey: string;
   model: string;
   customBaseUrl?: string;
+  apiVersion?: 'v1' | 'v1beta';
 }
 
 const AI_CONFIG_KEY = 'studyos_ai_config';
@@ -15,7 +16,8 @@ const AI_CONFIG_KEY = 'studyos_ai_config';
 export const DEFAULT_AI_CONFIG: AIConfig = {
   provider: 'gemini',
   apiKey: '',
-  model: 'gemini-2.0-flash',
+  model: 'gemini-3.8-flash',
+  apiVersion: 'v1beta',
 };
 
 export class AIService {
@@ -23,7 +25,18 @@ export class AIService {
     try {
       const stored = localStorage.getItem(AI_CONFIG_KEY);
       if (stored) {
-        return { ...DEFAULT_AI_CONFIG, ...JSON.parse(stored) };
+        const parsed = JSON.parse(stored);
+        // Auto-upgrade legacy models to Google's required gemini-3.8-flash
+        if (
+          !parsed.model ||
+          parsed.model.startsWith('gemini-1.') ||
+          parsed.model.startsWith('gemini-2.') ||
+          parsed.model === 'gemini-2.5-flash'
+        ) {
+          parsed.model = 'gemini-3.8-flash';
+          parsed.apiVersion = 'v1beta';
+        }
+        return { ...DEFAULT_AI_CONFIG, ...parsed };
       }
     } catch {}
     return DEFAULT_AI_CONFIG;
@@ -38,68 +51,92 @@ export class AIService {
     return Boolean(config.apiKey && config.apiKey.trim().length > 5);
   }
 
-  // Fetch all models supported by this specific Gemini API Key
-  static async fetchAvailableGeminiModels(apiKey: string): Promise<string[]> {
+  // Fetch all models supported by this specific Gemini API Key across v1 and v1beta
+  static async fetchAvailableGeminiModels(apiKey: string): Promise<{ name: string; version: 'v1' | 'v1beta' }[]> {
     if (!apiKey || apiKey.trim().length < 5) {
-      return ['gemini-2.0-flash', 'gemini-1.5-flash-latest', 'gemini-2.0-flash-exp', 'gemini-1.5-pro', 'gemini-1.5-flash'];
+      return [
+        { name: 'gemini-3.8-flash', version: 'v1beta' },
+        { name: 'gemini-3.7-flash', version: 'v1beta' },
+        { name: 'gemma-4-31b-it', version: 'v1' },
+      ];
     }
 
+    const discovered: { name: string; version: 'v1' | 'v1beta' }[] = [];
+
+    // Try v1beta first
     try {
-      const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey.trim()}`);
-      if (res.ok) {
-        const data = await res.json();
+      const resBeta = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey.trim()}`);
+      if (resBeta.ok) {
+        const data = await resBeta.json();
         if (data.models && Array.isArray(data.models)) {
-          const supported = data.models
+          data.models
             .filter((m: { supportedGenerationMethods?: string[] }) =>
               m.supportedGenerationMethods?.includes('generateContent')
             )
-            .map((m: { name: string }) => m.name.replace(/^models\//, ''));
-          
-          if (supported.length > 0) {
-            return supported;
-          }
+            .forEach((m: { name: string }) => {
+              const clean = m.name.replace(/^models\//, '');
+              discovered.push({ name: clean, version: 'v1beta' });
+            });
         }
       }
-    } catch (e) {
-      console.warn('Failed to query Gemini ListModels', e);
-    }
+    } catch {}
 
-    return ['gemini-2.0-flash', 'gemini-1.5-flash-latest', 'gemini-2.0-flash-exp', 'gemini-1.5-pro', 'gemini-1.5-flash'];
+    // Try v1
+    try {
+      const resV1 = await fetch(`https://generativelanguage.googleapis.com/v1/models?key=${apiKey.trim()}`);
+      if (resV1.ok) {
+        const data = await resV1.json();
+        if (data.models && Array.isArray(data.models)) {
+          data.models
+            .filter((m: { supportedGenerationMethods?: string[] }) =>
+              m.supportedGenerationMethods?.includes('generateContent')
+            )
+            .forEach((m: { name: string }) => {
+              const clean = m.name.replace(/^models\//, '');
+              if (!discovered.some(d => d.name === clean)) {
+                discovered.push({ name: clean, version: 'v1' });
+              }
+            });
+        }
+      }
+    } catch {}
+
+    if (discovered.length > 0) return discovered;
+
+    return [
+      { name: 'gemini-3.8-flash', version: 'v1beta' },
+      { name: 'gemini-3.7-flash', version: 'v1beta' },
+      { name: 'gemma-4-31b-it', version: 'v1' },
+    ];
   }
 
-  // Construct academic context awareness prompt
+  // Clean any model output that echoes internal prompt meta
+  private static cleanText(text: string): string {
+    if (!text) return '';
+    return text.replace(/^(?:[•\-\*]\s*(?:Persona|Context|Goal|Structure|Instructions|Guidelines):[^\n]*\n*)+/gi, '').trim() || text;
+  }
+
+  // Construct academic context prompt
   static buildAcademicContext(
     subjects: Subject[],
     exams: Exam[],
     tasks: Task[],
     notes: Note[]
   ): string {
-    const subjectList = subjects.map(s => `${s.code}: ${s.name} (Faculty: ${s.faculty || 'N/A'}, Room: ${s.room || 'N/A'})`).join('\n');
-    const examList = exams.map(e => `${e.title} on ${e.date} (Weightage: ${e.weightagePercent || 20}%)`).join('\n');
-    const taskList = tasks.filter(t => t.status !== 'completed').slice(0, 5).map(t => `- ${t.title} (Due: ${t.dueDate}, Priority: ${t.priority})`).join('\n');
-    const noteTitles = notes.slice(0, 6).map(n => `- ${n.title}`).join('\n');
+    const subjectList = subjects.map(s => s.code).join(', ');
+    const examList = exams.map(e => `${e.title} (${e.date})`).join(', ');
 
-    return `You are StudyOS AI, a world-class academic tutor and personal university mentor designed for high-performing students.
-The student is currently enrolled in:
-${subjectList || 'Standard undergraduate curriculum'}
+    return `You are StudyOS AI, an intelligent, ultra-fast university tutor.
+Student's courses: ${subjectList || 'Undergraduate'}.
+Upcoming exams: ${examList || 'None'}.
 
-Their upcoming exams:
-${examList || 'None scheduled'}
-
-Their top pending assignments:
-${taskList || 'No open tasks'}
-
-Their recent lecture notes:
-${noteTitles || 'None'}
-
-Guidelines:
-- Give rigorous, pedagogically sound, crystal-clear answers.
-- Use markdown formatting with clear headings, bullet points, and code blocks where applicable.
-- For math formulas, use standard notation (e.g. $E=mc^2$ or $$A = U \\Sigma V^T$$).
-- Be concise yet thorough, encouraging, and academically precise.`;
+Instructions:
+- Answer directly, concisely, and accurately.
+- Do NOT repeat instructions, goals, or personas.
+- Use clean markdown, bold terms, and bullet points.`;
   }
 
-  // Live test connection with auto-detection of working model
+  // Live test connection with auto-detection of working endpoint and model
   static async testConnection(config: AIConfig): Promise<{ success: boolean; message: string; updatedModel?: string }> {
     if (!config.apiKey.trim()) {
       return { success: false, message: 'Please provide an API key.' };
@@ -107,89 +144,99 @@ Guidelines:
 
     try {
       if (config.provider === 'gemini') {
-        const candidateModels = Array.from(
-          new Set([
-            config.model || 'gemini-2.0-flash',
-            'gemini-2.0-flash',
-            'gemini-1.5-flash-latest',
-            'gemini-2.0-flash-exp',
-            'gemini-1.5-pro',
-            'gemini-1.5-flash',
-          ])
-        );
+        const candidates: { model: string; version: 'v1' | 'v1beta' }[] = [
+          { model: config.model || 'gemini-3.8-flash', version: config.apiVersion || 'v1beta' },
+          { model: 'gemini-3.8-flash', version: 'v1beta' },
+          { model: 'gemini-3.7-flash', version: 'v1beta' },
+          { model: 'gemma-4-31b-it', version: 'v1' },
+          { model: 'gemini-3-flash-preview', version: 'v1beta' },
+        ];
 
         let lastErr = '';
-        for (const candidate of candidateModels) {
-          const url = `https://generativelanguage.googleapis.com/v1beta/models/${candidate}:generateContent?key=${config.apiKey.trim()}`;
-          const res = await fetch(url, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              contents: [{ role: 'user', parts: [{ text: 'Hello, confirm you are working in 5 words.' }] }],
-            }),
-          });
-
-          if (res.ok) {
-            const data = await res.json();
-            const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+        for (const candidate of candidates) {
+          try {
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 6000);
+            const url = `https://generativelanguage.googleapis.com/${candidate.version}/models/${candidate.model}:generateContent?key=${config.apiKey.trim()}`;
             
-            // If the working model is different from what was configured, update it automatically
-            if (candidate !== config.model) {
-              config.model = candidate;
+            const res = await fetch(url, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              signal: controller.signal,
+              body: JSON.stringify({
+                contents: [{ parts: [{ text: 'Hello! Respond with "Connected" in one word.' }] }],
+              }),
+            });
+            clearTimeout(timeoutId);
+
+            if (res.ok) {
+              const data = await res.json();
+              const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+              
+              config.model = candidate.model;
+              config.apiVersion = candidate.version;
               this.saveConfig(config);
+
+              return {
+                success: true,
+                message: `Connected to Google Gemini! Model: ${candidate.model} (${candidate.version}) — "${text?.trim() || 'Ready'}"`,
+                updatedModel: candidate.model,
+              };
+            } else {
+              const errData = await res.json().catch(() => ({}));
+              lastErr = errData?.error?.message || `HTTP ${res.status}`;
             }
-
-            return {
-              success: true,
-              message: `Connected to Google Gemini! Model: ${candidate} ("${text?.trim() || 'Ready'}")`,
-              updatedModel: candidate,
-            };
-          } else {
-            const errData = await res.json().catch(() => ({}));
-            lastErr = errData?.error?.message || `HTTP ${res.status}: ${res.statusText}`;
+          } catch (e) {
+            lastErr = (e as Error).message || 'Timeout connecting to model';
           }
         }
 
-        // If candidate list failed, try querying ListModels directly
+        // If candidates failed, try dynamically fetching models
         const dynamicModels = await this.fetchAvailableGeminiModels(config.apiKey);
-        for (const dynModel of dynamicModels) {
-          if (candidateModels.includes(dynModel)) continue;
-          const url = `https://generativelanguage.googleapis.com/v1beta/models/${dynModel}:generateContent?key=${config.apiKey.trim()}`;
-          const res = await fetch(url, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              contents: [{ role: 'user', parts: [{ text: 'Hello' }] }],
-            }),
-          });
+        for (const dyn of dynamicModels) {
+          try {
+            const url = `https://generativelanguage.googleapis.com/${dyn.version}/models/${dyn.name}:generateContent?key=${config.apiKey.trim()}`;
+            const res = await fetch(url, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                contents: [{ parts: [{ text: 'Hi' }] }],
+              }),
+            });
 
-          if (res.ok) {
-            config.model = dynModel;
-            this.saveConfig(config);
-            return {
-              success: true,
-              message: `Connected to Google Gemini! Auto-selected model: ${dynModel}`,
-              updatedModel: dynModel,
-            };
-          }
+            if (res.ok) {
+              config.model = dyn.name;
+              config.apiVersion = dyn.version;
+              this.saveConfig(config);
+              return {
+                success: true,
+                message: `Connected to Google Gemini! Auto-selected: ${dyn.name} (${dyn.version})`,
+                updatedModel: dyn.name,
+              };
+            }
+          } catch {}
         }
 
-        throw new Error(lastErr || 'Could not find a supported Gemini model for this API key.');
+        throw new Error(lastErr || 'Could not connect to Gemini with this key.');
       } else {
         // OpenAI or Custom
         const baseUrl = config.customBaseUrl?.trim() || 'https://api.openai.com/v1';
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 6000);
         const res = await fetch(`${baseUrl}/chat/completions`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
             'Authorization': `Bearer ${config.apiKey.trim()}`,
           },
+          signal: controller.signal,
           body: JSON.stringify({
             model: config.model || 'gpt-4o-mini',
-            messages: [{ role: 'user', content: 'Say hello in 5 words.' }],
-            max_tokens: 30,
+            messages: [{ role: 'user', content: 'Say Ready in one word.' }],
+            max_tokens: 10,
           }),
         });
+        clearTimeout(timeoutId);
 
         if (!res.ok) {
           const errData = await res.json().catch(() => ({}));
@@ -214,10 +261,14 @@ Guidelines:
     const systemPrompt = this.buildAcademicContext(context.subjects, context.exams, context.tasks, context.notes);
 
     if (this.isConfigured()) {
-      return this.callLLM(systemPrompt, `Please provide a thorough, structured academic explanation of the following topic:\n\n${prompt}\n\nInclude: 1. Core Intuition / Mental Model, 2. Key Mechanics & Formal Concepts, 3. Common Exam Traps or Misconceptions.`, config);
+      return this.callLLM(
+        systemPrompt,
+        `Explain the following topic clearly and directly for a student:\n\n${prompt}\n\nBreak it down into: 1. Core Intuition, 2. Key Mechanics & Principles, 3. Common Pitfalls or Exam Tips. Be concise and high-yield.`,
+        config
+      );
     } else {
       // Offline fallback heuristic
-      await new Promise(r => setTimeout(r, 600));
+      await new Promise(r => setTimeout(r, 400));
       return `### 🧠 Conceptual Breakdown: ${prompt}
 
 *(Note: Connect your free Google Gemini API Key in the top-right banner for live dynamic cloud generation!)*
@@ -247,16 +298,16 @@ To master **${prompt}**, think of it through fundamental building blocks. In com
     const systemPrompt = this.buildAcademicContext(context.subjects, context.exams, context.tasks, context.notes);
 
     if (this.isConfigured()) {
-      const prompt = `Generate 2 high-yield, exam-caliber multiple choice practice questions on: "${topic}".
-You MUST respond with VALID JSON in this EXACT structure (do not wrap in anything else except raw JSON or markdown code block):
+      const prompt = `Generate 2 quick, exam-caliber multiple choice practice questions on: "${topic}".
+Respond with ONLY valid JSON in this exact schema (no markdown wrap or extra commentary):
 {
-  "summary": "Brief encouraging introduction about this quiz",
+  "summary": "Brief encouraging introduction",
   "questions": [
     {
-      "question": "Question text here",
+      "question": "Question text",
       "options": ["Option A", "Option B", "Option C", "Option D"],
       "correctIndex": 0,
-      "explanation": "Detailed pedagogical explanation of why this answer is correct and why other options are wrong."
+      "explanation": "Concise explanation of the correct choice"
     }
   ]
 }`;
@@ -279,7 +330,7 @@ You MUST respond with VALID JSON in this EXACT structure (do not wrap in anythin
     }
 
     // Default high-yield practice quiz
-    await new Promise(r => setTimeout(r, 600));
+    await new Promise(r => setTimeout(r, 400));
     return {
       text: `Here is a practice quiz on **${topic}** to test your knowledge:`,
       quizData: [
@@ -318,14 +369,14 @@ You MUST respond with VALID JSON in this EXACT structure (do not wrap in anythin
     const systemPrompt = this.buildAcademicContext(context.subjects, context.exams, context.tasks, context.notes);
 
     if (this.isConfigured()) {
-      const prompt = `Generate 2-3 high-yield active-recall flashcards for spaced repetition on: "${topic}".
-You MUST respond with VALID JSON in this EXACT structure:
+      const prompt = `Generate 2 high-yield active-recall flashcards on: "${topic}".
+Respond with ONLY valid JSON in this exact structure:
 {
   "summary": "Summary of generated cards",
   "cards": [
     {
-      "front": "Clear, concise prompt or question",
-      "back": "High-yield concise answer or formula with key definition"
+      "front": "Concise prompt or definition question",
+      "back": "Key formula or concise explanation"
     }
   ]
 }`;
@@ -348,7 +399,7 @@ You MUST respond with VALID JSON in this EXACT structure:
     }
 
     // Default flashcard generation
-    await new Promise(r => setTimeout(r, 600));
+    await new Promise(r => setTimeout(r, 400));
     return {
       cards: [
         {
@@ -376,12 +427,12 @@ You MUST respond with VALID JSON in this EXACT structure:
       return this.callLLM(
         systemPrompt,
         `Generate a customized, day-by-day 7-day study revision plan for: "${topic}".
-Include a markdown table with columns: Day, Focus Area, High-Yield Activity, Target Hours.
-Also include 2-3 actionable pro-tips tailored to their upcoming exams and assignments.`,
+Include a clean markdown table with columns: Day, Focus Area, High-Yield Activity, Target Hours.
+Keep it punchy, practical, and fast to read.`,
         config
       );
     } else {
-      await new Promise(r => setTimeout(r, 600));
+      await new Promise(r => setTimeout(r, 400));
       return `### 📅 7-Day High-Yield Revision Plan for ${topic}
 
 | Day | Focus Area | High-Yield Activity | Target Hours |
@@ -398,118 +449,109 @@ Also include 2-3 actionable pro-tips tailored to their upcoming exams and assign
     }
   }
 
-  // Direct LLM invoker with resilient auto-fallback for Gemini models
+  // Direct LLM invoker with v1 and v1beta dual routing
   private static async callLLM(systemPrompt: string, userPrompt: string, config: AIConfig): Promise<string> {
     if (config.provider === 'gemini') {
-      const candidateModels = Array.from(
-        new Set([
-          config.model || 'gemini-2.0-flash',
-          'gemini-2.0-flash',
-          'gemini-1.5-flash-latest',
-          'gemini-2.0-flash-exp',
-          'gemini-1.5-pro',
-          'gemini-1.5-flash',
-        ])
+      const activeModel =
+        config.model && !config.model.includes('1.5') && !config.model.includes('2.0') && !config.model.includes('2.5')
+          ? config.model
+          : 'gemini-3.8-flash';
+
+      const candidates: { model: string; version: 'v1' | 'v1beta' }[] = [
+        { model: activeModel, version: 'v1beta' },
+        { model: 'gemini-3.8-flash', version: 'v1beta' },
+        { model: 'gemini-3.7-flash', version: 'v1beta' },
+        { model: 'gemma-4-31b-it', version: 'v1' },
+      ];
+
+      // Remove duplicates
+      const uniqueCandidates = candidates.filter(
+        (c, idx, arr) => arr.findIndex(x => x.model === c.model && x.version === c.version) === idx
       );
 
       let lastError = '';
 
-      for (const modelCandidate of candidateModels) {
-        const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelCandidate}:generateContent?key=${config.apiKey.trim()}`;
+      for (const candidate of uniqueCandidates) {
+        const url = `https://generativelanguage.googleapis.com/${candidate.version}/models/${candidate.model}:generateContent?key=${config.apiKey.trim()}`;
 
         try {
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), 4000); // 4s timeout
+
           const res = await fetch(url, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
+            signal: controller.signal,
             body: JSON.stringify({
-              systemInstruction: {
-                parts: [{ text: systemPrompt }],
-              },
               contents: [
                 {
-                  role: 'user',
-                  parts: [{ text: userPrompt }],
+                  parts: [
+                    {
+                      text: `${systemPrompt}\n\n[STUDENT QUERY]\n${userPrompt}`,
+                    },
+                  ],
                 },
               ],
               generationConfig: {
-                temperature: 0.7,
-                maxOutputTokens: 2048,
+                temperature: 0.4,
+                maxOutputTokens: 500, // Ultra-fast generation
               },
             }),
           });
+          clearTimeout(timeoutId);
 
           if (res.ok) {
             const data = await res.json();
             const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
             if (text) {
-              // If we succeeded with a fallback model, persist it so future requests are instant
-              if (modelCandidate !== config.model) {
-                config.model = modelCandidate;
+              if (candidate.model !== config.model || candidate.version !== config.apiVersion) {
+                config.model = candidate.model;
+                config.apiVersion = candidate.version;
                 this.saveConfig(config);
               }
-              return text;
+              return this.cleanText(text);
             }
           } else {
             const err = await res.json().catch(() => ({}));
             lastError = err?.error?.message || `Gemini API error (HTTP ${res.status})`;
-            // If the error is not a 404 (e.g. invalid key or quota exhausted), break and throw
-            if (res.status !== 404 && !lastError.includes('not found') && !lastError.includes('not supported')) {
+            if (res.status !== 404 && !lastError.includes('not found') && !lastError.includes('not supported') && !lastError.includes('no longer available')) {
               throw new Error(lastError);
             }
           }
         } catch (fetchErr) {
-          if ((fetchErr as Error).message && !(fetchErr as Error).message.includes('not found')) {
+          if ((fetchErr as Error).name === 'AbortError') {
+            lastError = 'Request timed out after 8 seconds';
+          } else if ((fetchErr as Error).message && !(fetchErr as Error).message.includes('not found')) {
             throw fetchErr;
           }
         }
       }
 
-      // If static candidates failed, query ListModels dynamically
-      try {
-        const dynamicModels = await this.fetchAvailableGeminiModels(config.apiKey);
-        for (const dynModel of dynamicModels) {
-          if (candidateModels.includes(dynModel)) continue;
-          const url = `https://generativelanguage.googleapis.com/v1beta/models/${dynModel}:generateContent?key=${config.apiKey.trim()}`;
-          const res = await fetch(url, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              contents: [{ role: 'user', parts: [{ text: `${systemPrompt}\n\n${userPrompt}` }] }],
-            }),
-          });
-
-          if (res.ok) {
-            const data = await res.json();
-            const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-            if (text) {
-              config.model = dynModel;
-              this.saveConfig(config);
-              return text;
-            }
-          }
-        }
-      } catch {}
-
-      throw new Error(lastError || 'Could not find an active Gemini model supporting generateContent for this API key.');
+      throw new Error(lastError || 'Could not complete request with Gemini.');
     } else {
       // OpenAI or Custom base URL
       const baseUrl = config.customBaseUrl?.trim() || 'https://api.openai.com/v1';
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 8000);
+
       const res = await fetch(`${baseUrl}/chat/completions`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${config.apiKey.trim()}`,
         },
+        signal: controller.signal,
         body: JSON.stringify({
           model: config.model || 'gpt-4o-mini',
           messages: [
             { role: 'system', content: systemPrompt },
             { role: 'user', content: userPrompt },
           ],
-          temperature: 0.7,
-          max_tokens: 2048,
+          temperature: 0.4,
+          max_tokens: 800,
         }),
       });
+      clearTimeout(timeoutId);
 
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
@@ -517,7 +559,7 @@ Also include 2-3 actionable pro-tips tailored to their upcoming exams and assign
       }
 
       const data = await res.json();
-      return data?.choices?.[0]?.message?.content || 'No response returned from model.';
+      return this.cleanText(data?.choices?.[0]?.message?.content || 'No response returned from model.');
     }
   }
 }

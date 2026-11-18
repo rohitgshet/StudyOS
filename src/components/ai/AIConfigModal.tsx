@@ -18,7 +18,7 @@ export const AIConfigModal: React.FC<AIConfigModalProps> = ({ isOpen, onClose, o
   const [showKey, setShowKey] = useState(false);
   const [isTesting, setIsTesting] = useState(false);
   const [testResult, setTestResult] = useState<{ success: boolean; message: string; updatedModel?: string } | null>(null);
-  const [availableGeminiModels, setAvailableGeminiModels] = useState<string[]>([]);
+  const [availableGeminiModels, setAvailableGeminiModels] = useState<{ name: string; version: 'v1' | 'v1beta' }[]>([]);
 
   // Sync state whenever modal is opened
   useEffect(() => {
@@ -80,7 +80,8 @@ export const AIConfigModal: React.FC<AIConfigModalProps> = ({ isOpen, onClose, o
                 setConfig({
                   ...config,
                   provider: 'gemini',
-                  model: config.model.includes('gemini') ? config.model : 'gemini-2.0-flash',
+                  model: config.model.includes('gemini') ? config.model : 'gemini-1.5-flash',
+                  apiVersion: 'v1',
                 })
               }
               className={`p-3 rounded-2xl border text-left transition-all ${
@@ -206,19 +207,26 @@ export const AIConfigModal: React.FC<AIConfigModalProps> = ({ isOpen, onClose, o
           {config.provider === 'gemini' ? (
             <select
               value={config.model}
-              onChange={e => setConfig({ ...config, model: e.target.value })}
+              onChange={e => {
+                const selected = e.target.value;
+                const match = availableGeminiModels.find(m => m.name === selected);
+                setConfig({
+                  ...config,
+                  model: selected,
+                  apiVersion: match ? match.version : selected.includes('2.0') || selected.includes('2.5') ? 'v1beta' : 'v1',
+                });
+              }}
               className="w-full bg-white/70 dark:bg-white/[0.05] border border-black/[0.08] dark:border-white/[0.12] text-foreground text-xs rounded-xl px-3 py-2 outline-none focus:border-[#0071E3]"
             >
-              <option value="gemini-2.0-flash">gemini-2.0-flash (Recommended: Standard & Ultra-fast)</option>
-              <option value="gemini-1.5-flash-latest">gemini-1.5-flash-latest (Auto-aliased)</option>
-              <option value="gemini-2.0-flash-exp">gemini-2.0-flash-exp (Experimental flagship)</option>
-              <option value="gemini-1.5-pro">gemini-1.5-pro (Deep analytical reasoning)</option>
-              <option value="gemini-1.5-flash">gemini-1.5-flash (Legacy)</option>
+              <option value="gemini-3.8-flash">gemini-3.8-flash (Recommended: Google Flagship)</option>
+              <option value="gemini-3.7-flash">gemini-3.7-flash</option>
+              <option value="gemma-4-31b-it">gemma-4-31b-it (Auto-detected on your key)</option>
+              <option value="gemini-3-flash-preview">gemini-3-flash-preview</option>
               {availableGeminiModels
-                .filter(m => !['gemini-2.0-flash', 'gemini-1.5-flash-latest', 'gemini-2.0-flash-exp', 'gemini-1.5-pro', 'gemini-1.5-flash'].includes(m))
+                .filter(m => !['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-2.0-flash', 'gemini-2.5-flash'].includes(m.name))
                 .map(m => (
-                  <option key={m} value={m}>
-                    {m} (Discovered from your key)
+                  <option key={m.name} value={m.name}>
+                    {m.name} ({m.version})
                   </option>
                 ))}
             </select>
