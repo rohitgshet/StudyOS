@@ -1,0 +1,156 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  /* Apple Light: Warm Creme, Silk White Glass, Light Pink, and Apple Blue */
+  --background: 40 25% 97%;          /* #FAF7F2 Warm Creme Canvas */
+  --foreground: 240 4% 12%;           /* #1D1D1F Apple Deep Graphite */
+  --card: 0 0% 100%;                  /* Translucent Frosted Glass Base */
+  --card-foreground: 240 4% 12%;
+  --border: 36 20% 90%;               /* #EAE4D9 Translucent Creme Border */
+  --primary: 211 100% 45%;            /* #0071E3 Apple Signature Blue */
+  --primary-foreground: 0 0% 100%;
+  --primary-hover: 211 100% 38%;
+  --muted: 36 25% 93%;                /* #F4ECE0 Creme Sand Muted */
+  --muted-foreground: 240 3% 46%;      /* #6E6E73 Apple Secondary Label */
+  --accent: 336 90% 95%;              /* #FDF2F5 Soft Blush Light Pink */
+  --accent-foreground: 336 80% 50%;   /* #E11D48 / #F43F5E */
+}
+
+.dark {
+  /* Apple Dark: Deep Obsidian/Espresso, Frosted Dark Glass, Blush & Blue Glows */
+  --background: 28 14% 6%;           /* #0F0E0D Apple Warm Obsidian */
+  --foreground: 0 0% 96%;             /* #F5F5F7 Apple Primary Light */
+  --card: 28 12% 10%;                 /* #1C1917 Dark Frosted Glass */
+  --card-foreground: 0 0% 96%;
+  --border: 28 10% 18%;               /* Translucent Dark Rim */
+  --primary: 211 100% 55%;            /* #38A7FF Apple Ice Blue */
+  --primary-foreground: 0 0% 100%;
+  --primary-hover: 211 100% 65%;
+  --muted: 28 10% 14%;                /* #262320 Warm Muted */
+  --muted-foreground: 240 3% 65%;      /* #86868B Apple Secondary Label Dark */
+  --accent: 336 75% 18%;              /* Deep Petal Pink Glow */
+  --accent-foreground: 336 95% 80%;   /* Light Blush Pink */
+}
+
+* {
+  border-color: hsl(var(--border));
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'SF Pro Display', 'Inter', sans-serif;
+  background-color: hsl(var(--background));
+  color: hsl(var(--foreground));
+  overflow-x: hidden;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Apple Ambient Lighting in Background */
+body::before {
+  content: '';
+  position: fixed;
+  top: -15%;
+  right: -10%;
+  width: 55vw;
+  height: 55vw;
+  border-radius: 9999px;
+  background: radial-gradient(circle, rgba(244, 114, 182, 0.12) 0%, rgba(244, 114, 182, 0.03) 50%, transparent 70%);
+  pointer-events: none;
+  z-index: 0;
+  filter: blur(80px);
+}
+
+body::after {
+  content: '';
+  position: fixed;
+  bottom: -20%;
+  left: -10%;
+  width: 60vw;
+  height: 60vw;
+  border-radius: 9999px;
+  background: radial-gradient(circle, rgba(0, 113, 227, 0.10) 0%, rgba(56, 189, 248, 0.03) 50%, transparent 70%);
+  pointer-events: none;
+  z-index: 0;
+  filter: blur(90px);
+}
+
+.dark body::before {
+  background: radial-gradient(circle, rgba(244, 114, 182, 0.08) 0%, rgba(244, 114, 182, 0.01) 50%, transparent 70%);
+}
+
+.dark body::after {
+  background: radial-gradient(circle, rgba(0, 113, 227, 0.08) 0%, rgba(56, 189, 248, 0.01) 50%, transparent 70%);
+}
+
+/* Custom Apple Glass Scrollbar */
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(140, 130, 120, 0.25);
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(140, 130, 120, 0.45);
+}
+
+/* Apple Frosted Glass Utilities */
+.apple-glass {
+  background: rgba(255, 255, 255, 0.68);
+  backdrop-filter: blur(28px) saturate(190%);
+  -webkit-backdrop-filter: blur(28px) saturate(190%);
+  border: 1px solid rgba(255, 255, 255, 0.75);
+  box-shadow: 0 4px 24px -1px rgba(0, 0, 0, 0.04), inset 0 1px 0 0 rgba(255, 255, 255, 0.9);
+}
+
+.dark .apple-glass {
+  background: rgba(26, 23, 21, 0.65);
+  backdrop-filter: blur(32px) saturate(190%);
+  -webkit-backdrop-filter: blur(32px) saturate(190%);
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.45), inset 0 1px 0 0 rgba(255, 255, 255, 0.12);
+}
+
+.apple-glass-card {
+  background: rgba(255, 255, 255, 0.6);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  border: 1px solid rgba(235, 227, 215, 0.65);
+  box-shadow: 0 2px 12px -2px rgba(0, 0, 0, 0.03), inset 0 1px 0 0 rgba(255, 255, 255, 0.8);
+  transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.dark .apple-glass-card {
+  background: rgba(28, 25, 23, 0.6);
+  backdrop-filter: blur(24px) saturate(180%);
+  -webkit-backdrop-filter: blur(24px) saturate(180%);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: 0 4px 20px -2px rgba(0, 0, 0, 0.3), inset 0 1px 0 0 rgba(255, 255, 255, 0.08);
+  transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.apple-glass-card:hover {
+  transform: translateY(-2px);
+  border-color: rgba(0, 113, 227, 0.35);
+  box-shadow: 0 8px 24px -4px rgba(0, 113, 227, 0.08), inset 0 1px 0 0 rgba(255, 255, 255, 0.9);
+}
+
+.dark .apple-glass-card:hover {
+  border-color: rgba(56, 167, 255, 0.3);
+  box-shadow: 0 8px 28px -4px rgba(0, 0, 0, 0.5), inset 0 1px 0 0 rgba(255, 255, 255, 0.15);
+}
+
+/* Translucent Pill / Chip */
+.apple-pill {
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
