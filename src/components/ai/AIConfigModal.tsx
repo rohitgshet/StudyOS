@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Modal } from '../common/Modal';
 import { Button } from '../common/Button';
 import { Input } from '../common/Input';
@@ -17,7 +17,23 @@ export const AIConfigModal: React.FC<AIConfigModalProps> = ({ isOpen, onClose, o
   const [config, setConfig] = useState<AIConfig>(() => AIService.getConfig());
   const [showKey, setShowKey] = useState(false);
   const [isTesting, setIsTesting] = useState(false);
-  const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
+  const [testResult, setTestResult] = useState<{ success: boolean; message: string; updatedModel?: string } | null>(null);
+  const [availableGeminiModels, setAvailableGeminiModels] = useState<string[]>([]);
+
+  // Sync state whenever modal is opened
+  useEffect(() => {
+    if (isOpen) {
+      const current = AIService.getConfig();
+      setConfig(current);
+      setTestResult(null);
+
+      if (current.provider === 'gemini' && current.apiKey.trim().length > 5) {
+        AIService.fetchAvailableGeminiModels(current.apiKey).then(models => {
+          if (models.length > 0) setAvailableGeminiModels(models);
+        });
+      }
+    }
+  }, [isOpen]);
 
   const handleTest = async () => {
     setIsTesting(true);
@@ -26,9 +42,12 @@ export const AIConfigModal: React.FC<AIConfigModalProps> = ({ isOpen, onClose, o
     setIsTesting(false);
     setTestResult(result);
     if (result.success) {
+      if (result.updatedModel && result.updatedModel !== config.model) {
+        setConfig(prev => ({ ...prev, model: result.updatedModel! }));
+      }
       toast.success('Live AI connection verified!');
     } else {
-      toast.error('Connection failed: ' + result.message);
+      toast.error('Connection test failed: ' + result.message);
     }
   };
 
@@ -61,7 +80,7 @@ export const AIConfigModal: React.FC<AIConfigModalProps> = ({ isOpen, onClose, o
                 setConfig({
                   ...config,
                   provider: 'gemini',
-                  model: config.model.includes('gemini') ? config.model : 'gemini-1.5-flash',
+                  model: config.model.includes('gemini') ? config.model : 'gemini-2.0-flash',
                 })
               }
               className={`p-3 rounded-2xl border text-left transition-all ${
@@ -159,8 +178,14 @@ export const AIConfigModal: React.FC<AIConfigModalProps> = ({ isOpen, onClose, o
               placeholder={config.provider === 'gemini' ? 'AIzaSy...' : 'sk-...'}
               value={config.apiKey}
               onChange={e => {
-                setConfig({ ...config, apiKey: e.target.value });
+                const newKey = e.target.value;
+                setConfig({ ...config, apiKey: newKey });
                 setTestResult(null);
+                if (config.provider === 'gemini' && newKey.trim().length > 10) {
+                  AIService.fetchAvailableGeminiModels(newKey).then(models => {
+                    if (models.length > 0) setAvailableGeminiModels(models);
+                  });
+                }
               }}
               required
               className="w-full bg-white/70 dark:bg-white/[0.05] border border-black/[0.08] dark:border-white/[0.12] text-foreground text-sm rounded-xl pl-3.5 pr-10 py-2 outline-none focus:border-[#0071E3] font-mono backdrop-blur-md"
@@ -184,9 +209,18 @@ export const AIConfigModal: React.FC<AIConfigModalProps> = ({ isOpen, onClose, o
               onChange={e => setConfig({ ...config, model: e.target.value })}
               className="w-full bg-white/70 dark:bg-white/[0.05] border border-black/[0.08] dark:border-white/[0.12] text-foreground text-xs rounded-xl px-3 py-2 outline-none focus:border-[#0071E3]"
             >
-              <option value="gemini-1.5-flash">gemini-1.5-flash (Recommended: Ultra-fast & Free Tier)</option>
+              <option value="gemini-2.0-flash">gemini-2.0-flash (Recommended: Standard & Ultra-fast)</option>
+              <option value="gemini-1.5-flash-latest">gemini-1.5-flash-latest (Auto-aliased)</option>
+              <option value="gemini-2.0-flash-exp">gemini-2.0-flash-exp (Experimental flagship)</option>
               <option value="gemini-1.5-pro">gemini-1.5-pro (Deep analytical reasoning)</option>
-              <option value="gemini-2.0-flash-exp">gemini-2.0-flash-exp (Latest experimental model)</option>
+              <option value="gemini-1.5-flash">gemini-1.5-flash (Legacy)</option>
+              {availableGeminiModels
+                .filter(m => !['gemini-2.0-flash', 'gemini-1.5-flash-latest', 'gemini-2.0-flash-exp', 'gemini-1.5-pro', 'gemini-1.5-flash'].includes(m))
+                .map(m => (
+                  <option key={m} value={m}>
+                    {m} (Discovered from your key)
+                  </option>
+                ))}
             </select>
           ) : config.provider === 'openai' ? (
             <select

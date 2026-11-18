@@ -15,7 +15,7 @@ const AI_CONFIG_KEY = 'studyos_ai_config';
 export const DEFAULT_AI_CONFIG: AIConfig = {
   provider: 'gemini',
   apiKey: '',
-  model: 'gemini-1.5-flash',
+  model: 'gemini-2.0-flash',
 };
 
 export class AIService {
@@ -36,6 +36,35 @@ export class AIService {
   static isConfigured(): boolean {
     const config = this.getConfig();
     return Boolean(config.apiKey && config.apiKey.trim().length > 5);
+  }
+
+  // Fetch all models supported by this specific Gemini API Key
+  static async fetchAvailableGeminiModels(apiKey: string): Promise<string[]> {
+    if (!apiKey || apiKey.trim().length < 5) {
+      return ['gemini-2.0-flash', 'gemini-1.5-flash-latest', 'gemini-2.0-flash-exp', 'gemini-1.5-pro', 'gemini-1.5-flash'];
+    }
+
+    try {
+      const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey.trim()}`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data.models && Array.isArray(data.models)) {
+          const supported = data.models
+            .filter((m: { supportedGenerationMethods?: string[] }) =>
+              m.supportedGenerationMethods?.includes('generateContent')
+            )
+            .map((m: { name: string }) => m.name.replace(/^models\//, ''));
+          
+          if (supported.length > 0) {
+            return supported;
+          }
+        }
+      }
+    } catch (e) {
+      console.warn('Failed to query Gemini ListModels', e);
+    }
+
+    return ['gemini-2.0-flash', 'gemini-1.5-flash-latest', 'gemini-2.0-flash-exp', 'gemini-1.5-pro', 'gemini-1.5-flash'];
   }
 
   // Construct academic context awareness prompt
@@ -70,31 +99,82 @@ Guidelines:
 - Be concise yet thorough, encouraging, and academically precise.`;
   }
 
-  // Live test connection
-  static async testConnection(config: AIConfig): Promise<{ success: boolean; message: string }> {
+  // Live test connection with auto-detection of working model
+  static async testConnection(config: AIConfig): Promise<{ success: boolean; message: string; updatedModel?: string }> {
     if (!config.apiKey.trim()) {
       return { success: false, message: 'Please provide an API key.' };
     }
 
     try {
       if (config.provider === 'gemini') {
-        const url = `https://generativelanguage.googleapis.com/v1beta/models/${config.model || 'gemini-1.5-flash'}:generateContent?key=${config.apiKey.trim()}`;
-        const res = await fetch(url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            contents: [{ role: 'user', parts: [{ text: 'Hello, confirm you are working in 5 words.' }] }],
-          }),
-        });
+        const candidateModels = Array.from(
+          new Set([
+            config.model || 'gemini-2.0-flash',
+            'gemini-2.0-flash',
+            'gemini-1.5-flash-latest',
+            'gemini-2.0-flash-exp',
+            'gemini-1.5-pro',
+            'gemini-1.5-flash',
+          ])
+        );
 
-        if (!res.ok) {
-          const errData = await res.json().catch(() => ({}));
-          throw new Error(errData?.error?.message || `HTTP ${res.status}: ${res.statusText}`);
+        let lastErr = '';
+        for (const candidate of candidateModels) {
+          const url = `https://generativelanguage.googleapis.com/v1beta/models/${candidate}:generateContent?key=${config.apiKey.trim()}`;
+          const res = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              contents: [{ role: 'user', parts: [{ text: 'Hello, confirm you are working in 5 words.' }] }],
+            }),
+          });
+
+          if (res.ok) {
+            const data = await res.json();
+            const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+            
+            // If the working model is different from what was configured, update it automatically
+            if (candidate !== config.model) {
+              config.model = candidate;
+              this.saveConfig(config);
+            }
+
+            return {
+              success: true,
+              message: `Connected to Google Gemini! Model: ${candidate} ("${text?.trim() || 'Ready'}")`,
+              updatedModel: candidate,
+            };
+          } else {
+            const errData = await res.json().catch(() => ({}));
+            lastErr = errData?.error?.message || `HTTP ${res.status}: ${res.statusText}`;
+          }
         }
 
-        const data = await res.json();
-        const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-        return { success: true, message: `Connected to Google Gemini! Response: "${text?.trim()}"` };
+        // If candidate list failed, try querying ListModels directly
+        const dynamicModels = await this.fetchAvailableGeminiModels(config.apiKey);
+        for (const dynModel of dynamicModels) {
+          if (candidateModels.includes(dynModel)) continue;
+          const url = `https://generativelanguage.googleapis.com/v1beta/models/${dynModel}:generateContent?key=${config.apiKey.trim()}`;
+          const res = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              contents: [{ role: 'user', parts: [{ text: 'Hello' }] }],
+            }),
+          });
+
+          if (res.ok) {
+            config.model = dynModel;
+            this.saveConfig(config);
+            return {
+              success: true,
+              message: `Connected to Google Gemini! Auto-selected model: ${dynModel}`,
+              updatedModel: dynModel,
+            };
+          }
+        }
+
+        throw new Error(lastErr || 'Could not find a supported Gemini model for this API key.');
       } else {
         // OpenAI or Custom
         const baseUrl = config.customBaseUrl?.trim() || 'https://api.openai.com/v1';
@@ -318,39 +398,99 @@ Also include 2-3 actionable pro-tips tailored to their upcoming exams and assign
     }
   }
 
-  // Direct LLM invoker
+  // Direct LLM invoker with resilient auto-fallback for Gemini models
   private static async callLLM(systemPrompt: string, userPrompt: string, config: AIConfig): Promise<string> {
     if (config.provider === 'gemini') {
-      const model = config.model || 'gemini-1.5-flash';
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${config.apiKey.trim()}`;
+      const candidateModels = Array.from(
+        new Set([
+          config.model || 'gemini-2.0-flash',
+          'gemini-2.0-flash',
+          'gemini-1.5-flash-latest',
+          'gemini-2.0-flash-exp',
+          'gemini-1.5-pro',
+          'gemini-1.5-flash',
+        ])
+      );
 
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          systemInstruction: {
-            parts: [{ text: systemPrompt }],
-          },
-          contents: [
-            {
-              role: 'user',
-              parts: [{ text: userPrompt }],
-            },
-          ],
-          generationConfig: {
-            temperature: 0.7,
-            maxOutputTokens: 2048,
-          },
-        }),
-      });
+      let lastError = '';
 
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err?.error?.message || `Gemini API error (HTTP ${res.status})`);
+      for (const modelCandidate of candidateModels) {
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelCandidate}:generateContent?key=${config.apiKey.trim()}`;
+
+        try {
+          const res = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              systemInstruction: {
+                parts: [{ text: systemPrompt }],
+              },
+              contents: [
+                {
+                  role: 'user',
+                  parts: [{ text: userPrompt }],
+                },
+              ],
+              generationConfig: {
+                temperature: 0.7,
+                maxOutputTokens: 2048,
+              },
+            }),
+          });
+
+          if (res.ok) {
+            const data = await res.json();
+            const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+            if (text) {
+              // If we succeeded with a fallback model, persist it so future requests are instant
+              if (modelCandidate !== config.model) {
+                config.model = modelCandidate;
+                this.saveConfig(config);
+              }
+              return text;
+            }
+          } else {
+            const err = await res.json().catch(() => ({}));
+            lastError = err?.error?.message || `Gemini API error (HTTP ${res.status})`;
+            // If the error is not a 404 (e.g. invalid key or quota exhausted), break and throw
+            if (res.status !== 404 && !lastError.includes('not found') && !lastError.includes('not supported')) {
+              throw new Error(lastError);
+            }
+          }
+        } catch (fetchErr) {
+          if ((fetchErr as Error).message && !(fetchErr as Error).message.includes('not found')) {
+            throw fetchErr;
+          }
+        }
       }
 
-      const data = await res.json();
-      return data?.candidates?.[0]?.content?.parts?.[0]?.text || 'No response returned from model.';
+      // If static candidates failed, query ListModels dynamically
+      try {
+        const dynamicModels = await this.fetchAvailableGeminiModels(config.apiKey);
+        for (const dynModel of dynamicModels) {
+          if (candidateModels.includes(dynModel)) continue;
+          const url = `https://generativelanguage.googleapis.com/v1beta/models/${dynModel}:generateContent?key=${config.apiKey.trim()}`;
+          const res = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              contents: [{ role: 'user', parts: [{ text: `${systemPrompt}\n\n${userPrompt}` }] }],
+            }),
+          });
+
+          if (res.ok) {
+            const data = await res.json();
+            const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+            if (text) {
+              config.model = dynModel;
+              this.saveConfig(config);
+              return text;
+            }
+          }
+        }
+      } catch {}
+
+      throw new Error(lastError || 'Could not find an active Gemini model supporting generateContent for this API key.');
     } else {
       // OpenAI or Custom base URL
       const baseUrl = config.customBaseUrl?.trim() || 'https://api.openai.com/v1';
